@@ -1,52 +1,35 @@
-import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
-import { createStackNavigator } from '@react-navigation/stack';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
-
-import HomeScreen from './src/screens/HomeScreen';
+import LoginScreen    from './src/screens/LoginScreen';
+import WorkerDashboard from './src/screens/WorkerDashboard';
+import CheckInScreen  from './src/screens/CheckInScreen';
 import RegisterScreen from './src/screens/RegisterScreen';
-import CheckInScreen from './src/screens/CheckInScreen';
-import WorkerListScreen from './src/screens/WorkerListScreen';
+import RecordsScreen  from './src/screens/RecordsScreen';
+import AdminLoginScreen from './src/screens/AdminLoginScreen';
+import SupervisorDashboard from './src/screens/SupervisorDashboard';
 
-const Stack = createStackNavigator();
+const Stack = createNativeStackNavigator();
 
 export default function App() {
   return (
     <NavigationContainer>
-      <StatusBar style="light" />
+      <StatusBar style="light" backgroundColor="#0A0A0F" />
       <Stack.Navigator
-        initialRouteName="Home"
+        initialRouteName="Login"
         screenOptions={{
-          headerStyle: {
-            backgroundColor: '#1a1a2e',
-          },
-          headerTintColor: '#fff',
-          headerTitleStyle: {
-            fontWeight: 'bold',
-          },
-          cardStyle: { backgroundColor: '#16213e' }
+          headerShown  : false,
+          animation    : 'slide_from_right',
+          contentStyle : { backgroundColor: '#0A0A0F' },
         }}
       >
-        <Stack.Screen 
-          name="Home" 
-          component={HomeScreen} 
-          options={{ title: 'Attendance System' }} 
-        />
-        <Stack.Screen 
-          name="Register" 
-          component={RegisterScreen} 
-          options={{ title: 'Register Worker' }} 
-        />
-        <Stack.Screen 
-          name="CheckIn" 
-          component={CheckInScreen} 
-          options={{ title: 'Check In' }} 
-        />
-        <Stack.Screen 
-          name="WorkerList" 
-          component={WorkerListScreen} 
-          options={{ title: 'Registered Workers' }} 
-        />
+        <Stack.Screen name="Login"    component={LoginScreen}    />
+        <Stack.Screen name="WorkerDashboard" component={WorkerDashboard} />
+        <Stack.Screen name="CheckIn"  component={CheckInScreen}  />
+        <Stack.Screen name="Register" component={RegisterScreen} />
+        <Stack.Screen name="Records"  component={RecordsScreen}  />
+        <Stack.Screen name="AdminLogin" component={AdminLoginScreen} />
+        <Stack.Screen name="SupervisorDashboard" component={SupervisorDashboard} />
       </Stack.Navigator>
     </NavigationContainer>
   );

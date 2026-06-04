@@ -36,7 +36,8 @@ def init_db():
         risk_level   TEXT,
         trust_score  REAL,
         record_hash  TEXT,
-        synced       INTEGER DEFAULT 0
+        synced       INTEGER DEFAULT 0,
+        photo_path   TEXT
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS failed_attempts (
         id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,8 +45,28 @@ def init_db():
         timestamp TEXT,
         latitude  REAL,
         longitude REAL,
-        reason    TEXT
+        reason    TEXT,
+        photo_path TEXT
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS workers (
+        worker_id  TEXT PRIMARY KEY,
+        name       TEXT,
+        password   TEXT,
+        role       TEXT,
+        phone      TEXT,
+        department TEXT,
+        embedding  TEXT
+    )''')
+    
+    # Try adding photo_path column to existing tables just in case
+    try:
+        c.execute("ALTER TABLE attendance ADD COLUMN photo_path TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE failed_attempts ADD COLUMN photo_path TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
@@ -61,10 +82,10 @@ def get_last_hash() -> str:
 
 @router.post("/attendance/checkin")
 def check_in(req: AttendanceRequest):
-    # Get worker saved embedding
+    # Get worker saved embedding from sqlite
     conn = sqlite3.connect(DB_PATH)
     c    = conn.cursor()
-    c.execute("SELECT worker_name, embedding FROM workers WHERE worker_id = ?", (req.worker_id,))
+    c.execute("SELECT name, embedding FROM workers WHERE worker_id = ?", (req.worker_id,))
     row  = c.fetchone()
     conn.close()
 
@@ -74,6 +95,19 @@ def check_in(req: AttendanceRequest):
     worker_name     = row[0]
     saved_embedding = json.loads(row[1])
     previous_hash   = get_last_hash()
+
+    import base64
+    import time
+    
+    # Save photo to disk
+    os.makedirs("saved_models/photos", exist_ok=True)
+    photo_filename = f"{req.worker_id}_{int(time.time())}.jpg"
+    photo_path = f"saved_models/photos/{photo_filename}"
+    try:
+        with open(photo_path, "wb") as f:
+            f.write(base64.b64decode(req.image_base64))
+    except Exception as e:
+        photo_path = ""
 
     # Run full 6-module pipeline
     result = full_verify_pipeline(
@@ -94,8 +128,8 @@ def check_in(req: AttendanceRequest):
         # Log failed attempt
         conn = sqlite3.connect(DB_PATH)
         c    = conn.cursor()
-        c.execute("INSERT INTO failed_attempts (worker_id, timestamp, latitude, longitude, reason) VALUES (?,?,?,?,?)",
-                  (req.worker_id, req.timestamp, req.latitude, req.longitude, result.get("reason", "Unknown")))
+        c.execute("INSERT INTO failed_attempts (worker_id, timestamp, latitude, longitude, reason, photo_path) VALUES (?,?,?,?,?,?)",
+                  (req.worker_id, req.timestamp, req.latitude, req.longitude, result.get("reason", "Unknown"), photo_path))
         conn.commit()
         conn.close()
         return {"success": False, "worker_id": req.worker_id, "message": result["reason"]}
@@ -104,11 +138,11 @@ def check_in(req: AttendanceRequest):
     conn = sqlite3.connect(DB_PATH)
     c    = conn.cursor()
     c.execute('''INSERT INTO attendance
-        (worker_id, worker_name, similarity, latitude, longitude, timestamp, risk_level, trust_score, record_hash, synced)
-        VALUES (?,?,?,?,?,?,?,?,?,0)''',
+        (worker_id, worker_name, similarity, latitude, longitude, timestamp, risk_level, trust_score, record_hash, synced, photo_path)
+        VALUES (?,?,?,?,?,?,?,?,?,0,?)''',
         (req.worker_id, worker_name, result["similarity"],
          req.latitude, req.longitude, req.timestamp,
-         result["risk_level"], result["trust_score"], result["record_hash"]))
+         result["risk_level"], result["trust_score"], result["record_hash"], photo_path))
     conn.commit()
     conn.close()
 
@@ -153,3 +187,52 @@ def verify_chain_endpoint():
     conn.close()
     records = [{"worker_id": r[0], "timestamp": r[1], "similarity": r[2], "record_hash": r[3]} for r in rows]
     return verify_record_chain(records)
+
+@router.get("/attendance/all")
+def get_all_records():
+    conn = sqlite3.connect(DB_PATH)
+    c    = conn.cursor()
+    
+    # Load workers to get departments
+    c.execute("SELECT worker_id, department, role FROM workers")
+    workers_rows = c.fetchall()
+    workers_map = {r[0]: {"department": r[1], "role": r[2]} for r in workers_rows}
+
+    c.execute("SELECT * FROM attendance ORDER BY id DESC")
+    att_rows = c.fetchall()
+    att_cols = ["id","worker_id","worker_name","similarity","latitude","longitude","timestamp","risk_level","trust_score","record_hash","synced","photo_path"]
+    attendance_records = [dict(zip(att_cols, r)) for r in att_rows]
+    
+    # Read photo as base64 and attach department for dashboard
+    import base64
+    for rec in attendance_records:
+        wid = rec["worker_id"]
+        rec["department"] = workers_map.get(wid, {}).get("department", "Unassigned")
+        rec["role"]       = workers_map.get(wid, {}).get("role", "Unknown")
+        
+        path = rec.get("photo_path")
+        if path and os.path.exists(path):
+            with open(path, "rb") as f:
+                rec["image_base64"] = base64.b64encode(f.read()).decode('utf-8')
+        else:
+            rec["image_base64"] = None
+
+    c.execute("SELECT * FROM failed_attempts ORDER BY id DESC")
+    fail_rows = c.fetchall()
+    fail_cols = ["id","worker_id","timestamp","latitude","longitude","reason","photo_path"]
+    failed_records = [dict(zip(fail_cols, r)) for r in fail_rows]
+    
+    for rec in failed_records:
+        wid = rec["worker_id"]
+        rec["department"] = workers_map.get(wid, {}).get("department", "Unassigned")
+        rec["role"]       = workers_map.get(wid, {}).get("role", "Unknown")
+
+        path = rec.get("photo_path")
+        if path and os.path.exists(path):
+            with open(path, "rb") as f:
+                rec["image_base64"] = base64.b64encode(f.read()).decode('utf-8')
+        else:
+            rec["image_base64"] = None
+            
+    conn.close()
+    return {"attendance": attendance_records, "failed_attempts": failed_records}

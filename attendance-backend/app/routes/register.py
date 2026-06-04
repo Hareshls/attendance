@@ -7,31 +7,21 @@ from app.services.face_service import get_embedding
 import json
 import os
 import numpy as np
+import sqlite3
 
 router = APIRouter()
 
-EMBEDDINGS_FILE = "saved_models/embeddings.json"
-# Stores all worker face embeddings as JSON
-# In production this would be a proper database
-
-
-def load_embeddings():
-    if not os.path.exists(EMBEDDINGS_FILE):
-        return {}
-    with open(EMBEDDINGS_FILE, "r") as f:
-        return json.load(f)
-
-
-def save_embeddings(data):
-    os.makedirs("saved_models", exist_ok=True)
-    with open(EMBEDDINGS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+DB_PATH = "attendance.db"
 
 
 @router.post("/register")
 async def register_worker(
     worker_id: str        = Form(...),   # unique ID like EMP001
     name:      str        = Form(...),   # worker's full name
+    password:  str        = Form(...),   # worker's password
+    role:      str        = Form(default=""),   # worker's role
+    phone:     str        = Form(default=""),   # worker's phone
+    department:str        = Form(default=""),   # worker's department
     image:     UploadFile = File(...)    # face photo
 ):
     # Validate it's an image
@@ -57,24 +47,30 @@ async def register_worker(
             detail="Face processing failed: " + str(e)
         )
 
-    embeddings = load_embeddings()
+    # Convert embedding to JSON string
+    embedding_json = json.dumps(embedding)
 
-    if worker_id in embeddings:
-        # Worker already exists — average new embedding with old one
-        # This improves accuracy by capturing multiple lighting conditions
-        old_vec = embeddings[worker_id]["embedding"]
-        avg     = ((np.array(old_vec) + np.array(embedding)) / 2).tolist()
-        embeddings[worker_id]["embedding"] = avg
+    # Save to SQLite DB
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT worker_id FROM workers WHERE worker_id = ?", (worker_id,))
+    exists = c.fetchone()
+
+    if exists:
+        c.execute('''UPDATE workers 
+                     SET name=?, password=?, role=?, phone=?, department=?, embedding=? 
+                     WHERE worker_id=?''',
+                  (name, password, role, phone, department, embedding_json, worker_id))
         message = "Worker " + name + " embedding updated"
     else:
-        embeddings[worker_id] = {
-            "worker_id": worker_id,
-            "name":      name,
-            "embedding": embedding
-        }
+        c.execute('''INSERT INTO workers 
+                     (worker_id, name, password, role, phone, department, embedding) 
+                     VALUES (?,?,?,?,?,?,?)''',
+                  (worker_id, name, password, role, phone, department, embedding_json))
         message = "Worker " + name + " registered successfully"
-
-    save_embeddings(embeddings)
+    
+    conn.commit()
+    conn.close()
 
     return {
         "success":   True,
@@ -87,23 +83,50 @@ async def register_worker(
 @router.get("/workers")
 def get_all_workers():
     # Returns list of all registered workers (no embeddings exposed)
-    embeddings = load_embeddings()
-    workers = [
-        {"worker_id": v["worker_id"], "name": v["name"]}
-        for v in embeddings.values()
-    ]
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT worker_id, name FROM workers")
+    workers = [{"worker_id": row[0], "name": row[1]} for row in c.fetchall()]
+    conn.close()
     return {"total": len(workers), "workers": workers}
 
 
-@router.delete("/workers/{worker_id}")
+@router.get("/worker/delete/{worker_id}")
 def delete_worker(worker_id: str):
-    # Remove a worker from the system
-    embeddings = load_embeddings()
-    if worker_id not in embeddings:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT worker_id FROM workers WHERE worker_id = ?", (worker_id,))
+    if not c.fetchone():
+        conn.close()
         raise HTTPException(
             status_code=404,
-            detail="Worker " + worker_id + " not found"
+            detail=f"Worker {worker_id} not found."
         )
-    del embeddings[worker_id]
-    save_embeddings(embeddings)
+    
+    c.execute("DELETE FROM workers WHERE worker_id = ?", (worker_id,))
+    conn.commit()
+    conn.close()
     return {"success": True, "message": "Worker " + worker_id + " deleted"}
+
+@router.post("/worker/login")
+def worker_login(worker_id: str = Form(...), password: str = Form(...)):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name, password, department, role FROM workers WHERE worker_id = ?", (worker_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if row:
+        name, saved_pwd, department, role = row
+        if saved_pwd and saved_pwd != password:
+            return {"success": False, "message": "Incorrect password."}
+
+        return {
+            "success": True, 
+            "worker_id": worker_id, 
+            "name": name,
+            "department": department or "",
+            "role": role or ""
+        }
+    else:
+        return {"success": False, "message": "Worker ID not found. Please register first."}
