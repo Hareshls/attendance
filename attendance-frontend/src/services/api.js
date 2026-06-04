@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // ── Change this to your backend IP when testing on real device ──
 // For iOS Simulator: use localhost
 // For Android Emulator: use 10.0.2.2
-const BASE_URL = 'http://localhost:8000/api/v1';
+const BASE_URL = 'http://192.168.1.110:8000/api/v1';
 
 const TIMEOUT = 8000; // 8 seconds timeout
 
@@ -31,6 +31,16 @@ export const apiService = {
     const response = await fetchWithTimeout(`${BASE_URL}/worker/login`, {
       method: 'POST',
       body: formData,
+    });
+    return response.json();
+  },
+
+  // ── Worker Face Login ──
+  workerFaceLogin: async (data) => {
+    const response = await fetchWithTimeout(`${BASE_URL}/worker/face-login`, {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify(data),
     });
     return response.json();
   },

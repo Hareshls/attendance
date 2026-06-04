@@ -8,6 +8,7 @@ import RegisterScreen from './src/screens/RegisterScreen';
 import RecordsScreen  from './src/screens/RecordsScreen';
 import AdminLoginScreen from './src/screens/AdminLoginScreen';
 import SupervisorDashboard from './src/screens/SupervisorDashboard';
+import SupervisorRegisterScreen from './src/screens/SupervisorRegisterScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -30,6 +31,7 @@ export default function App() {
         <Stack.Screen name="Records"  component={RecordsScreen}  />
         <Stack.Screen name="AdminLogin" component={AdminLoginScreen} />
         <Stack.Screen name="SupervisorDashboard" component={SupervisorDashboard} />
+        <Stack.Screen name="SupervisorRegister" component={SupervisorRegisterScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

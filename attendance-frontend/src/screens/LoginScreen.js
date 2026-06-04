@@ -1,39 +1,95 @@
-import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, SafeAreaView, Alert, ActivityIndicator } from 'react-native';
+import React, { useState, useRef } from 'react';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, SafeAreaView, Alert, ActivityIndicator, Animated } from 'react-native';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { apiService } from '../services/api';
 
 export default function LoginScreen({ navigation }) {
+  const [permission, requestPermission] = useCameraPermissions();
+  const cameraRef = useRef(null);
+
+  const [step, setStep] = useState('form');
   const [workerId, setWorkerId] = useState('');
-  const [password, setPassword] = useState('');
+  const [dob, setDob] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleLogin = async () => {
-    if (!workerId.trim() || !password.trim()) {
-      Alert.alert('Error', 'Please enter your Worker ID and Password');
+  const initiateFaceLogin = async () => {
+    if (!workerId.trim() || !dob.trim()) {
+      console.error("Login validation failed: Missing Worker ID or DOB");
+      Alert.alert('Error', 'Please enter your Worker ID and Date of Birth');
       return;
     }
+    if (!permission?.granted) {
+      const result = await requestPermission();
+      if (!result.granted) {
+        Alert.alert('Permission required', 'Camera access is needed for face login.');
+        return;
+      }
+    }
+    setStep('camera');
+  };
+
+  const captureAndLogin = async () => {
+    if (!cameraRef.current) return;
     setLoading(true);
     try {
-      const res = await apiService.workerLogin(workerId.trim(), password.trim());
+      const photo = await cameraRef.current.takePictureAsync({ quality: 0.8, base64: true });
+      setStep('verifying');
+      
+      const res = await apiService.workerFaceLogin({
+        worker_id: workerId.trim(),
+        password: dob.trim(),
+        image_base64: photo.base64
+      });
+
       if (res.success) {
         await AsyncStorage.setItem('worker_id', res.worker_id);
         await AsyncStorage.setItem('worker_name', res.name);
         navigation.replace('WorkerDashboard');
       } else {
+        console.error("Login validation failed from server:", res.message);
         Alert.alert('Login Failed', res.message);
+        setStep('form');
       }
     } catch (e) {
-      // Offline fallback: check if we have it locally
-      const localId = await AsyncStorage.getItem('worker_id');
-      if (localId && localId === workerId.trim()) {
-        navigation.replace('WorkerDashboard');
-      } else {
-        Alert.alert('Error', 'Network error. Could not verify Worker ID.');
-      }
+      console.error("Login validation failed due to network error:", e);
+      Alert.alert('Error', 'Network error. Could not verify face login.');
+      setStep('form');
     }
     setLoading(false);
   };
+
+  if (step === 'camera' || step === 'verifying') {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => setStep('form')} disabled={loading}>
+            <Text style={styles.backBtn}>← BACK</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>FACE LOGIN</Text>
+          <View style={{ width: 60 }} />
+        </View>
+
+        <View style={styles.cameraSection}>
+          <View style={styles.cameraFrame}>
+            <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="front" />
+            {step === 'verifying' && (
+               <View style={styles.overlay}>
+                 <ActivityIndicator size="large" color="#00FF9C" />
+                 <Text style={styles.overlayText}>VERIFYING...</Text>
+               </View>
+            )}
+          </View>
+          
+          {step === 'camera' && (
+            <TouchableOpacity style={styles.captureBtn} onPress={captureAndLogin}>
+              <View style={styles.captureBtnInner} />
+            </TouchableOpacity>
+          )}
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container}>
@@ -54,23 +110,28 @@ export default function LoginScreen({ navigation }) {
         </View>
 
         <View style={styles.inputGroup}>
-          <Text style={styles.label}>PASSWORD</Text>
+          <Text style={styles.label}>DATE OF BIRTH (DDMMYYYY)</Text>
           <TextInput
             style={styles.input}
-            value={password}
-            onChangeText={setPassword}
-            placeholder="••••••••"
+            value={dob}
+            onChangeText={setDob}
+            placeholder="e.g. 15081995"
             placeholderTextColor="rgba(255,255,255,0.2)"
+            keyboardType="number-pad"
+            maxLength={8}
             secureTextEntry
           />
         </View>
 
-        <TouchableOpacity style={styles.btn} onPress={handleLogin} disabled={loading}>
-          {loading ? <ActivityIndicator color="#0A0A0F" /> : <Text style={styles.btnText}>LOGIN</Text>}
-        </TouchableOpacity>
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>FACE AUTHENTICATION</Text>
+          <Text style={{color: 'rgba(255,255,255,0.4)', fontSize: 12, marginBottom: 12}}>
+            Your biometric data will be verified for secure access.
+          </Text>
+        </View>
 
-        <TouchableOpacity onPress={() => navigation.navigate('Register')} style={styles.linkWrap}>
-          <Text style={styles.linkTxt}>New user? <Text style={{color: '#00FF9C'}}>Register here</Text></Text>
+        <TouchableOpacity style={styles.btn} onPress={initiateFaceLogin} disabled={loading}>
+          {loading ? <ActivityIndicator color="#0A0A0F" /> : <Text style={styles.btnText}>SCAN FACE TO LOGIN</Text>}
         </TouchableOpacity>
       </View>
 
@@ -98,9 +159,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFF', borderRadius: 14,
     paddingVertical: 18, alignItems: 'center', marginTop: 12
   },
-  btnText: { color: '#0A0A0F', fontWeight: '800', letterSpacing: 2 },
+  btnText: { color: '#0A0A0F', fontWeight: '800', letterSpacing: 1 },
   linkWrap: { marginTop: 32, alignItems: 'center' },
   linkTxt: { color: 'rgba(255,255,255,0.4)', fontSize: 13 },
   adminWrap: { padding: 24, alignItems: 'center' },
-  adminTxt: { color: 'rgba(255,255,255,0.2)', fontSize: 11, letterSpacing: 2 }
+  adminTxt: { color: 'rgba(255,255,255,0.2)', fontSize: 11, letterSpacing: 2 },
+  
+  // Camera styles
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 24, paddingVertical: 16 },
+  backBtn: { color: 'rgba(255,255,255,0.4)', fontSize: 12, letterSpacing: 1, width: 60 },
+  headerTitle: { color: '#FFF', fontSize: 13, letterSpacing: 4, fontWeight: '700' },
+  cameraSection: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  cameraFrame: { width: 300, height: 300, borderRadius: 150, overflow: 'hidden', backgroundColor: '#111', borderWidth: 2, borderColor: '#00FF9C' },
+  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
+  overlayText: { color: '#00FF9C', marginTop: 12, letterSpacing: 2, fontWeight: '700' },
+  captureBtn: { width: 72, height: 72, borderRadius: 36, borderWidth: 3, borderColor: '#FFF', alignItems: 'center', justifyContent: 'center', marginTop: 40 },
+  captureBtnInner: { width: 54, height: 54, borderRadius: 27, backgroundColor: '#FFF' },
 });

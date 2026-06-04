@@ -90,6 +90,7 @@ export default function CheckInScreen({ navigation }) {
     setChallenge(random);
     setStep('challenge');
     challengeStart.current = Date.now();
+    startScan();
   };
 
   const getChallengePreview = (chal) => {
@@ -108,7 +109,6 @@ export default function CheckInScreen({ navigation }) {
     const latencyMs = Date.now() - challengeStart.current;
 
     setStep('scanning');
-    startScan();
 
     try {
       const photo = await cameraRef.current.takePictureAsync({
@@ -258,23 +258,26 @@ export default function CheckInScreen({ navigation }) {
             <View style={[styles.corner, styles.cBL]} />
             <View style={[styles.corner, styles.cBR]} />
             {/* Scan line */}
-            {step === 'scanning' && (
+            {(step === 'scanning' || step === 'challenge') && (
               <Animated.View style={[styles.scanLine, { transform: [{ translateY: scanAnim }] }]} />
             )}
             {/* Face oval */}
-            <View style={styles.oval} />
+            <View style={styles.oval}>
+              <View style={styles.crosshairX} />
+              <View style={styles.crosshairY} />
+            </View>
           </View>
 
           {/* Challenge prompt */}
           {step === 'challenge' && (
             <View style={styles.challengeBox}>
-              <Text style={styles.challengeLabel}>PERFORM ACTION</Text>
-              <Text style={styles.challengeText}>{challenge}</Text>
+              <Text style={styles.challengeLabel}>BIOMETRIC SCAN REQUIRED</Text>
+              <Text style={styles.challengeText}>AWAITING: {challenge}</Text>
               <Text style={styles.challengePreview}>{getChallengePreview(challenge)}</Text>
               <TouchableOpacity style={styles.captureBtn} onPress={handleCapture}>
-                <View style={styles.captureBtnInner} />
+                <Text style={styles.captureBtnText}>INITIATE SCAN</Text>
               </TouchableOpacity>
-              <Text style={styles.challengeHint}>Tap when done</Text>
+              <Text style={styles.challengeHint}>Tap to capture biometric data</Text>
             </View>
           )}
 
@@ -341,21 +344,26 @@ const styles = StyleSheet.create({
   },
   oval         : {
     position: 'absolute',
-    width: FRAME * 0.58, height: FRAME * 0.72,
-    borderRadius: FRAME * 0.29,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)',
+    width: FRAME * 0.65, height: FRAME * 0.8,
+    borderRadius: FRAME * 0.325,
+    borderWidth: 2, borderColor: 'rgba(0, 255, 156, 0.4)',
+    borderStyle: 'dashed',
     alignSelf: 'center', top: FRAME * 0.1,
+    alignItems: 'center', justifyContent: 'center'
   },
+  crosshairX   : { position: 'absolute', width: '100%', height: 1, backgroundColor: 'rgba(0, 255, 156, 0.2)' },
+  crosshairY   : { position: 'absolute', width: 1, height: '100%', backgroundColor: 'rgba(0, 255, 156, 0.2)' },
   challengeBox : { marginTop: 24, alignItems: 'center', gap: 8 },
-  challengeLabel: { color: 'rgba(255,255,255,0.4)', fontSize: 10, letterSpacing: 3 },
-  challengeText : { color: '#00FF9C', fontSize: 30, fontWeight: '900', letterSpacing: 2 },
-  challengePreview: { fontSize: 48, marginTop: 4, marginBottom: 8 },
+  challengeLabel: { color: 'rgba(0, 255, 156, 0.7)', fontSize: 11, letterSpacing: 3 },
+  challengeText : { color: '#00FF9C', fontSize: 22, fontWeight: '900', letterSpacing: 2 },
+  challengePreview: { fontSize: 40, marginTop: 2, marginBottom: 6 },
   captureBtn   : {
-    width: 72, height: 72, borderRadius: 36,
-    borderWidth: 3, borderColor: '#FFF',
+    paddingVertical: 14, paddingHorizontal: 32, borderRadius: 12,
+    backgroundColor: 'rgba(0, 255, 156, 0.15)',
+    borderWidth: 1, borderColor: '#00FF9C',
     alignItems: 'center', justifyContent: 'center', marginTop: 8,
   },
-  captureBtnInner: { width: 54, height: 54, borderRadius: 27, backgroundColor: '#FFF' },
+  captureBtnText: { color: '#00FF9C', fontWeight: '800', letterSpacing: 2, fontSize: 13 },
   challengeHint : { color: 'rgba(255,255,255,0.25)', fontSize: 11, marginTop: 4 },
   verifyBox    : { marginTop: 24, alignItems: 'center', gap: 10, width: FRAME },
   verifyText   : { color: '#00FF9C', fontSize: 11, letterSpacing: 3 },

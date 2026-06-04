@@ -33,21 +33,36 @@ export default function SupervisorDashboard({ navigation }) {
     allRecords.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
     const grouped = {};
+    const alerts = [];
     allRecords.forEach(rec => {
-      const dept = rec.department || 'Unassigned';
-      const date = new Date(rec.timestamp).toLocaleDateString();
-      if (!grouped[dept]) grouped[dept] = {};
-      if (!grouped[dept][date]) grouped[dept][date] = [];
-      grouped[dept][date].push(rec);
+      if (rec.type === 'failed') {
+        alerts.push(rec);
+      } else {
+        const dept = rec.department || 'Unassigned';
+        const date = new Date(rec.timestamp).toLocaleDateString();
+        if (!grouped[dept]) grouped[dept] = {};
+        if (!grouped[dept][date]) grouped[dept][date] = [];
+        grouped[dept][date].push(rec);
+      }
     });
 
-    const sections = Object.keys(grouped).map(dept => ({
-      department: dept,
-      dates: Object.keys(grouped[dept]).map(date => ({
-        date,
-        records: grouped[dept][date]
-      }))
-    }));
+    const sections = [];
+    if (alerts.length > 0) {
+      sections.push({
+        department: '⚠️ CRITICAL ALERTS',
+        dates: [{ date: 'SPOOF ATTEMPTS', records: alerts }]
+      });
+    }
+
+    Object.keys(grouped).forEach(dept => {
+      sections.push({
+        department: dept,
+        dates: Object.keys(grouped[dept]).map(date => ({
+          date,
+          records: grouped[dept][date]
+        }))
+      });
+    });
 
     return sections;
   };
@@ -125,6 +140,10 @@ export default function SupervisorDashboard({ navigation }) {
         </TouchableOpacity>
       </View>
 
+      <TouchableOpacity style={styles.enrollBtn} onPress={() => navigation.navigate('SupervisorRegister')}>
+        <Text style={styles.enrollBtnTxt}>+ ENROLL NEW WORKER</Text>
+      </TouchableOpacity>
+
       {loading ? (
         <View style={styles.loader}><ActivityIndicator color="#00FF9C" size="large" /></View>
       ) : (
@@ -146,6 +165,8 @@ const styles = StyleSheet.create({
   back: { color: 'rgba(255,255,255,0.4)', fontSize: 12, letterSpacing: 1 },
   headerTitle: { color: '#FFF', fontSize: 14, fontWeight: '800', letterSpacing: 2 },
   refresh: { color: '#00FF9C', fontSize: 20 },
+  enrollBtn: { marginHorizontal: 24, marginBottom: 16, backgroundColor: 'rgba(0,255,156,0.1)', borderWidth: 1, borderColor: '#00FF9C', padding: 16, borderRadius: 12, alignItems: 'center' },
+  enrollBtnTxt: { color: '#00FF9C', fontWeight: '800', letterSpacing: 1 },
   loader: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   list: { paddingHorizontal: 24, paddingBottom: 40, gap: 16 },
   
