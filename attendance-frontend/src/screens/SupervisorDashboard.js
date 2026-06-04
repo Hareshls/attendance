@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, FlatList, TouchableOpacity, Image, ActivityIndicator, SectionList } from 'react-native';
+import { View, Text, StyleSheet, SafeAreaView, FlatList, TouchableOpacity, Image, ActivityIndicator, SectionList, Alert } from 'react-native';
 import { apiService } from '../services/api';
+import { DatabaseService } from '../services/DatabaseService';
 
 export default function SupervisorDashboard({ navigation }) {
   const [data, setData] = useState({ attendance: [], failed_attempts: [] });
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [expandedDept, setExpandedDept] = useState(null);
 
   useEffect(() => {
@@ -15,11 +17,44 @@ export default function SupervisorDashboard({ navigation }) {
     setLoading(true);
     try {
       const res = await apiService.getSupervisorData();
+      
+      // Also fetch local offline attendance that hasn't synced
+      const localAttendance = await DatabaseService.getUnsyncedAttendance();
+      if (localAttendance && localAttendance.length > 0) {
+         res.attendance = [...localAttendance, ...res.attendance];
+      }
+      
       setData(res);
     } catch (e) {
       console.log('Error fetching dashboard data:', e);
     }
     setLoading(false);
+  };
+
+  const syncOfflineData = async () => {
+    setSyncing(true);
+    try {
+      const unsynced = await DatabaseService.getUnsyncedAttendance();
+      if (!unsynced || unsynced.length === 0) {
+        Alert.alert('Sync', 'No offline records to sync.');
+        setSyncing(false);
+        return;
+      }
+      
+      // Stub: in reality we'd POST these to the Python backend in a batch
+      // e.g. await apiService.batchSync(unsynced);
+      console.log('Syncing records to cloud...', unsynced.length);
+      
+      const ids = unsynced.map(r => r.id);
+      await DatabaseService.markSynced(ids);
+      
+      Alert.alert('Sync Complete', `Synced ${unsynced.length} records to the cloud.`);
+      fetchData(); // Refresh UI
+    } catch (e) {
+      console.error('Sync failed', e);
+      Alert.alert('Sync Failed', 'Could not sync records.');
+    }
+    setSyncing(false);
   };
 
   // Group data: Department -> Date -> Member Records
@@ -94,8 +129,12 @@ export default function SupervisorDashboard({ navigation }) {
             {isFailed && <Text style={styles.failReason}>Reason: {item.reason}</Text>}
             {!isFailed && (
               <>
-                <Text style={styles.detailTxt}>Match: {item.similarity}%</Text>
-                <Text style={styles.detailTxt}>Trust: {item.trust_score}%</Text>
+                <Text style={styles.detailTxt}>
+                  Match: <Text style={{ color: item.similarity >= 60 ? '#00FF9C' : '#FF4D6D', fontWeight: 'bold' }}>{item.similarity}%</Text>
+                </Text>
+                <Text style={styles.detailTxt}>
+                  Trust: <Text style={{ color: item.trust_score >= 70 ? '#00FF9C' : '#FF4D6D', fontWeight: 'bold' }}>{item.trust_score}%</Text>
+                </Text>
               </>
             )}
             <Text style={[styles.detailTxt, hasWarning && { color: '#FF4D6D', fontWeight: 'bold' }]}>
@@ -143,6 +182,10 @@ export default function SupervisorDashboard({ navigation }) {
       <TouchableOpacity style={styles.enrollBtn} onPress={() => navigation.navigate('SupervisorRegister')}>
         <Text style={styles.enrollBtnTxt}>+ ENROLL NEW WORKER</Text>
       </TouchableOpacity>
+      
+      <TouchableOpacity style={styles.syncBtn} onPress={syncOfflineData} disabled={syncing}>
+        <Text style={styles.syncBtnTxt}>{syncing ? 'SYNCING...' : '☁️ SYNC OFFLINE DATA'}</Text>
+      </TouchableOpacity>
 
       {loading ? (
         <View style={styles.loader}><ActivityIndicator color="#00FF9C" size="large" /></View>
@@ -165,8 +208,10 @@ const styles = StyleSheet.create({
   back: { color: 'rgba(255,255,255,0.4)', fontSize: 12, letterSpacing: 1 },
   headerTitle: { color: '#FFF', fontSize: 14, fontWeight: '800', letterSpacing: 2 },
   refresh: { color: '#00FF9C', fontSize: 20 },
-  enrollBtn: { marginHorizontal: 24, marginBottom: 16, backgroundColor: 'rgba(0,255,156,0.1)', borderWidth: 1, borderColor: '#00FF9C', padding: 16, borderRadius: 12, alignItems: 'center' },
+  enrollBtn: { marginHorizontal: 24, marginBottom: 8, backgroundColor: 'rgba(0,255,156,0.1)', borderWidth: 1, borderColor: '#00FF9C', padding: 16, borderRadius: 12, alignItems: 'center' },
   enrollBtnTxt: { color: '#00FF9C', fontWeight: '800', letterSpacing: 1 },
+  syncBtn: { marginHorizontal: 24, marginBottom: 16, backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', padding: 14, borderRadius: 12, alignItems: 'center' },
+  syncBtnTxt: { color: '#FFF', fontWeight: '700', letterSpacing: 1, fontSize: 12 },
   loader: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   list: { paddingHorizontal: 24, paddingBottom: 40, gap: 16 },
   

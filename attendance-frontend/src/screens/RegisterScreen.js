@@ -11,6 +11,7 @@ const { width } = Dimensions.get('window');
 
 export default function RegisterScreen({ navigation }) {
   const [permission, requestPermission] = useCameraPermissions();
+  const hasPermission = permission?.granted;
   const camera = useRef(null);
 
   const [step, setStep]         = useState('form');   // form|capture|done
@@ -47,9 +48,9 @@ export default function RegisterScreen({ navigation }) {
       return;
     }
     
-    if (!permission?.granted) {
+    if (!hasPermission) {
       const result = await requestPermission();
-      if (!result.granted) {
+      if (!result) {
         Alert.alert('Permission required', 'Camera access is needed to capture your face.');
         return;
       }
@@ -61,9 +62,9 @@ export default function RegisterScreen({ navigation }) {
   const capturePhoto = async () => {
     if (!camera.current) return;
     try {
-      const photo = await camera.current.takePictureAsync({ quality: 0.85, base64: true });
-      const base64 = photo.base64;
-      const newPhotos = [...photos, base64];
+      const photo = await camera.current.takePictureAsync({ base64: true, quality: 0.5 });
+      const base64Data = photo.base64;
+      const newPhotos = [...photos, base64Data];
       setPhotos(newPhotos);
       setCaptured(newPhotos.length);
 

@@ -18,7 +18,9 @@
         {
           "locationWhenInUsePermission": "Allow FieldVerify to access your location for attendance."
         }
-      ]
+      ],
+      "expo-sqlite",
+      "expo-secure-store"
     ],
     "ios": {
       "supportsTablet": false,

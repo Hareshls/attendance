@@ -57,7 +57,7 @@ export const apiService = {
     
     // In React Native, FormData accepts an object with uri, type, name for files
     formData.append('image', {
-      uri: `data:image/jpeg;base64,${data.image_base64}`,
+      uri: data.photo_uri,
       type: 'image/jpeg',
       name: 'face.jpg',
     });

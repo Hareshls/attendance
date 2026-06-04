@@ -83,7 +83,8 @@ async def register_worker(
         "success":   True,
         "worker_id": worker_id,
         "name":      name,
-        "message":   message
+        "message":   message,
+        "embedding": embedding
     }
 
 
@@ -143,7 +144,7 @@ import datetime
 
 class FaceLoginRequest(BaseModel):
     worker_id: str
-    password: str
+    password: str = ""
     image_base64: str
 
 @router.post("/worker/face-login")
@@ -159,8 +160,6 @@ def worker_face_login(req: FaceLoginRequest):
 
     name, department, role, embedding_str, saved_pwd = row
     
-    if saved_pwd and saved_pwd != req.password:
-        return {"success": False, "message": "Incorrect password"}
     saved_embedding = json.loads(embedding_str)
 
     # Use the full_verify_pipeline to check for liveness/spoofs. We skip location checks by passing mock coords.

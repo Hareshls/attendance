@@ -6,6 +6,13 @@ import {
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { apiService } from '../services/api';
+import { DatabaseService } from '../services/DatabaseService';
+import { initTFJS } from '../utils/tfjsSetup';
+import * as tf from '@tensorflow/tfjs';
+import * as faceapi from 'face-api.js';
+import { decodeJpeg } from '@tensorflow/tfjs-react-native';
+import { Buffer } from 'buffer';
+import * as ImageManipulator from 'expo-image-manipulator';
 
 const { width } = Dimensions.get('window');
 
@@ -20,12 +27,12 @@ const ROLE_MAPPINGS = {
 
 export default function SupervisorRegisterScreen({ navigation }) {
   const [permission, requestPermission] = useCameraPermissions();
+  const hasPermission = permission?.granted;
   const camera = useRef(null);
 
   const [step, setStep]         = useState('form');   // form|capture|done
   const [workerId, setWorkerId] = useState('');
   const [workerName, setWorkerName] = useState('');
-  const [dob, setDob] = useState('');
   const [role, setRole]         = useState('');
   const [phone, setPhone]       = useState('');
   const [department, setDepartment] = useState('');
@@ -38,6 +45,13 @@ export default function SupervisorRegisterScreen({ navigation }) {
 
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 700, useNativeDriver: true }).start();
+    
+    // Initialize Offline DB and TFJS
+    const initOfflineDependencies = async () => {
+      await DatabaseService.init();
+      await initTFJS();
+    };
+    initOfflineDependencies();
   }, []);
 
   const shake = () => {
@@ -50,16 +64,16 @@ export default function SupervisorRegisterScreen({ navigation }) {
   };
 
   const goToCapture = async () => {
-    if (!workerId.trim() || !workerName.trim() || !dob.trim() || !role.trim() || !department.trim()) {
+    if (!workerId.trim() || !workerName.trim() || !role.trim() || !department.trim()) {
       shake();
-      console.error("Registration validation failed: Missing Info (ID, Name, DOB, Role, Dept)");
-      Alert.alert('Missing Info', 'Please fill in all required fields (ID, Name, DOB, Role)');
+      console.error("Registration validation failed: Missing Info (ID, Name, Role, Dept)");
+      Alert.alert('Missing Info', 'Please fill in all required fields (ID, Name, Role)');
       return;
     }
     
-    if (!permission?.granted) {
+    if (!hasPermission) {
       const result = await requestPermission();
-      if (!result.granted) {
+      if (!result) {
         Alert.alert('Permission required', 'Camera access is needed to capture your face.');
         return;
       }
@@ -67,48 +81,50 @@ export default function SupervisorRegisterScreen({ navigation }) {
     
     setStep('capture');
   };
-
   const capturePhoto = async () => {
     if (!camera.current) return;
     try {
-      const photo = await camera.current.takePictureAsync({ quality: 0.85, base64: true });
-      const base64 = photo.base64;
-      const newPhotos = [...photos, base64];
-      setPhotos(newPhotos);
-      setCaptured(newPhotos.length);
+      setLoading(true);
+      const photo = await camera.current.takePictureAsync({ base64: true, quality: 0.5 });
+      
+      // Upload to server for instant extraction
+      const apiResult = await apiService.register({
+        worker_id: workerId.trim(),
+        worker_name: workerName.trim(),
+        role: role.trim(),
+        department: department.trim(),
+        photo_uri: resizedPhoto.uri // Use shrunk image so upload takes 10ms
+      });
 
-      // After 3 photos → auto register
-      if (newPhotos.length >= 3) {
-        await registerWorker(newPhotos);
+      if (!apiResult.success) {
+        setLoading(false);
+        Alert.alert('Server Error', apiResult.message || 'Failed to extract face');
+        return;
       }
-    } catch (e) {
-      Alert.alert('Error', 'Could not capture photo');
-    }
-  };
 
-  const registerWorker = async (photoList) => {
-    setLoading(true);
-    try {
-      const response = await apiService.register({
+      // Save worker to local encrypted SQLite for OFFLINE Check-ins
+      const worker = {
         worker_id   : workerId.trim(),
         worker_name : workerName.trim(),
-        password    : dob.trim(),
+        dob         : '',
         role        : role.trim(),
         phone       : phone.trim(),
         department  : department.trim(),
-        image_base64: photoList[0],
-      });
+        image_base64: base64Data,
+        embedding   : apiResult.embedding,
+      };
 
-      if (response.success) {
+      const result = await DatabaseService.saveWorkerLocally(worker);
+
+      if (result.success) {
         setStep('done');
       } else {
-        console.error("Registration validation failed from server:", response.message);
-        Alert.alert('Registration Failed', response.message || 'Try again');
-        setLoading(false);
+        Alert.alert('Local DB Error', result.error || 'Failed to save locally');
       }
     } catch (e) {
-      console.error("Registration validation failed due to network error:", e);
-      Alert.alert('Error', 'Registration failed due to network error.');
+      console.error(e);
+      Alert.alert('Network Error', 'Could not connect to the server for registration.');
+    } finally {
       setLoading(false);
     }
   };
@@ -154,7 +170,7 @@ export default function SupervisorRegisterScreen({ navigation }) {
         <View style={styles.captureSection}>
           {/* Photo counter */}
           <View style={styles.photoCounter}>
-            {[0, 1, 2].map(i => (
+            {[0].map(i => (
               <View key={i} style={[
                 styles.photoDot,
                 { backgroundColor: i < captured ? '#00FF9C' : 'rgba(255,255,255,0.15)' }
@@ -164,8 +180,7 @@ export default function SupervisorRegisterScreen({ navigation }) {
 
           <Text style={styles.captureInstruction}>
             {captured === 0 && 'LOOK STRAIGHT AT CAMERA'}
-            {captured === 1 && 'TURN SLIGHTLY LEFT'}
-            {captured === 2 && 'TURN SLIGHTLY RIGHT'}
+            {captured === 1 && 'PROCESSING...'}
           </Text>
 
           {/* Camera */}
@@ -244,19 +259,7 @@ export default function SupervisorRegisterScreen({ navigation }) {
             />
           </View>
 
-          {/* DOB */}
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>DATE OF BIRTH (DDMMYYYY)</Text>
-            <TextInput
-              style={styles.input}
-              value={dob}
-              onChangeText={setDob}
-              placeholder="e.g. 15081995"
-              placeholderTextColor="rgba(255,255,255,0.2)"
-              keyboardType="number-pad"
-              maxLength={8}
-            />
-          </View>
+
 
           {/* Role Selection */}
           <View style={styles.inputGroup}>
@@ -293,7 +296,7 @@ export default function SupervisorRegisterScreen({ navigation }) {
           {/* Info box */}
           <View style={styles.infoBox}>
             <Text style={styles.infoTitle}>WHAT HAPPENS NEXT</Text>
-            <Text style={styles.infoItem}>◦  3 face photos captured</Text>
+            <Text style={styles.infoItem}>◦  1 face photo captured</Text>
             <Text style={styles.infoItem}>◦  Face converted to 128 numbers</Text>
             <Text style={styles.infoItem}>◦  Encrypted and saved on device</Text>
             <Text style={styles.infoItem}>◦  No photos stored — only numbers</Text>

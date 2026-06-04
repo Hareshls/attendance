@@ -6,8 +6,14 @@ import {
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as FileSystem from 'expo-file-system';
-import { apiService } from '../services/api';
+import * as Location from 'expo-location';
+import { DatabaseService } from '../services/DatabaseService';
+import { initTFJS } from '../utils/tfjsSetup';
+import * as tf from '@tensorflow/tfjs';
+import * as faceapi from 'face-api.js';
+import { decodeJpeg } from '@tensorflow/tfjs-react-native';
+import { Buffer } from 'buffer';
+import * as ImageManipulator from 'expo-image-manipulator';
 import { getLocation } from '../utils/location';
 
 const { width } = Dimensions.get('window');
@@ -16,6 +22,7 @@ const CHALLENGES = ['BLINK', 'SMILE', 'TURN LEFT', 'TURN RIGHT', 'NOD'];
 
 export default function CheckInScreen({ navigation }) {
   const [permission, requestPermission] = useCameraPermissions();
+  const hasPermission = permission?.granted;
   const cameraRef = useRef(null);
 
   const [step, setStep]         = useState('idle'); // idle -> location_preview -> challenge -> scanning -> verifying
@@ -32,6 +39,11 @@ export default function CheckInScreen({ navigation }) {
 
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+    const setup = async () => {
+      await DatabaseService.init();
+      await initTFJS();
+    };
+    setup();
     loadWorker();
   }, []);
 
@@ -56,8 +68,8 @@ export default function CheckInScreen({ navigation }) {
   };
 
   const startLocationPreview = async () => {
-    if (!permission?.granted) {
-      requestPermission();
+    if (!hasPermission) {
+      await requestPermission();
       return;
     }
     setStep('location_preview');
@@ -111,56 +123,104 @@ export default function CheckInScreen({ navigation }) {
     setStep('scanning');
 
     try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality : 0.7,
-        base64  : true,
+      const photo = await cameraRef.current.takePictureAsync({ base64: false, quality: 0.5 });
+      
+      setStep('verifying'); // UI feedback immediately
+
+      // -- RESIZE IMAGE FOR FASTER TFJS PROCESSING --
+      const resizedPhoto = await ImageManipulator.manipulateAsync(
+        photo.uri,
+        [{ resize: { width: 250 } }], // aggressively shrink image for CPU JS
+        { compress: 0.5, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+      );
+      const base64Data = resizedPhoto.base64;
+
+      // 1. Fetch encrypted worker from local SQLite
+      const worker = await DatabaseService.getWorkerLocally(workerId);
+      
+      if (!worker) {
+        setResult({ success: false, message: 'Worker not found locally. Please enroll first.' });
+        setStep('failed');
+        return;
+      }
+
+      // 2. Decode Jpeg to TF Tensor
+      const raw = Buffer.from(base64Data, 'base64');
+      const tensor = decodeJpeg(new Uint8Array(raw));
+
+      // 3. Extract embedding from live photo
+      const detection = await faceapi.detectSingleFace(tensor, new faceapi.TinyFaceDetectorOptions({ inputSize: 160 }))
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+
+      tensor.dispose(); // CRITICAL
+
+      if (!detection) {
+        setResult({ success: false, message: 'No face detected in frame. Try again.' });
+        setStep('failed');
+        return;
+      }
+
+      const liveEmbedding = Array.from(detection.descriptor);
+
+      // 4. Compute Euclidean Distance (or Cosine Similarity)
+      const distance = faceapi.euclideanDistance(liveEmbedding, worker.embedding);
+      // face-api threshold is usually 0.6 for euclidian distance
+      // lower is better (closer match)
+      const isMatch = distance < 0.6;
+      const similarityScore = Math.max(0, 100 - (distance * 100)); // rough conversion to %
+
+      if (!isMatch) {
+        setResult({ success: false, message: 'Face mismatch. Access Denied.' });
+        setStep('failed');
+        return;
+      }
+
+      // 5. Compute Risk Score (Simulated Liveness & Location)
+      const risk_level = similarityScore > 85 ? 'LOW' : 'MEDIUM';
+
+      // 6. Log Attendance Locally
+      const record = {
+        worker_id: workerId,
+        worker_name: worker.name,
+        similarity: similarityScore.toFixed(1),
+        risk_level: risk_level,
+        trust_score: 95,
+        latitude: locationObj ? locationObj.latitude : 0,
+        longitude: locationObj ? locationObj.longitude : 0,
+      };
+
+      await DatabaseService.logAttendanceLocally(record);
+
+      setResult({
+        success: true,
+        message: 'Verified Offline ✅',
+        worker_id: workerId,
+        name: worker.name,
+        similarity: similarityScore.toFixed(1),
+        risk_level: risk_level,
       });
-
-      setStep('verifying');
-
-      Animated.timing(progressAnim, {
-        toValue: 1, duration: 1500, useNativeDriver: false
-      }).start();
-
-      const response = await apiService.checkIn({
-        worker_id       : workerId,
-        image_base64    : photo.base64,
-        latitude        : locationObj ? locationObj.latitude : 0,
-        longitude       : locationObj ? locationObj.longitude : 0,
-        timestamp       : new Date().toISOString(),
-        ear_value       : 0.20,
-        response_latency: latencyMs,
-        challenge       : challenge.toLowerCase().replace(' ', '_'),
-        is_mock_location: false,
-      });
-
-      setResult(response);
-      setStep(response.success ? 'done' : 'failed');
+      setStep('done');
 
     } catch (error) {
-      // Offline — save locally
-      await saveOffline();
-      setResult({ success: true, offline: true, message: 'Saved offline ✅' });
-      setStep('done');
+      console.error("Offline Check-In Error", error);
+      setResult({ success: false, message: 'Error during offline check-in' });
+      setStep('failed');
     }
   };
 
   const saveOffline = async () => {
-    const existing = JSON.parse(await AsyncStorage.getItem('offline_records') || '[]');
-    existing.push({ worker_id: workerId, timestamp: new Date().toISOString(), offline: true });
-    await AsyncStorage.setItem('offline_records', JSON.stringify(existing));
+    // Deprecated: We now use DatabaseService.logAttendanceLocally
   };
 
-  const reset = () => {
+  const resetAll = () => {
     setStep('idle');
     setResult(null);
     scanAnim.setValue(0);
     progressAnim.setValue(0);
   };
 
-  // ── Permission not granted ──
-  if (!permission) return <View style={styles.container} />;
-  if (!permission.granted) {
+  if (!hasPermission) {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.permBox}>
@@ -189,7 +249,7 @@ export default function CheckInScreen({ navigation }) {
           {result?.similarity && (
             <View style={styles.statRow}>
               <Text style={styles.statLbl}>MATCH</Text>
-              <Text style={styles.statVal}>{result.similarity}%</Text>
+              <Text style={[styles.statVal, { color: result.similarity >= 60 ? '#00FF9C' : '#FF4D6D' }]}>{result.similarity}%</Text>
             </View>
           )}
           {result?.risk_level && (

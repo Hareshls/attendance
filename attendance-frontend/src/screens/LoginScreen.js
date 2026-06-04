@@ -6,22 +6,22 @@ import { apiService } from '../services/api';
 
 export default function LoginScreen({ navigation }) {
   const [permission, requestPermission] = useCameraPermissions();
+  const hasPermission = permission?.granted;
   const cameraRef = useRef(null);
 
   const [step, setStep] = useState('form');
   const [workerId, setWorkerId] = useState('');
-  const [dob, setDob] = useState('');
   const [loading, setLoading] = useState(false);
 
   const initiateFaceLogin = async () => {
-    if (!workerId.trim() || !dob.trim()) {
-      console.error("Login validation failed: Missing Worker ID or DOB");
-      Alert.alert('Error', 'Please enter your Worker ID and Date of Birth');
+    if (!workerId.trim()) {
+      console.error("Login validation failed: Missing Worker ID");
+      Alert.alert('Error', 'Please enter your Worker ID');
       return;
     }
-    if (!permission?.granted) {
+    if (!hasPermission) {
       const result = await requestPermission();
-      if (!result.granted) {
+      if (!result) {
         Alert.alert('Permission required', 'Camera access is needed for face login.');
         return;
       }
@@ -33,13 +33,14 @@ export default function LoginScreen({ navigation }) {
     if (!cameraRef.current) return;
     setLoading(true);
     try {
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.8, base64: true });
+      const photo = await cameraRef.current.takePictureAsync({ base64: true, quality: 0.5 });
       setStep('verifying');
       
+      const base64Data = photo.base64;
+
       const res = await apiService.workerFaceLogin({
         worker_id: workerId.trim(),
-        password: dob.trim(),
-        image_base64: photo.base64
+        image_base64: base64Data
       });
 
       if (res.success) {
@@ -109,19 +110,7 @@ export default function LoginScreen({ navigation }) {
           />
         </View>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>DATE OF BIRTH (DDMMYYYY)</Text>
-          <TextInput
-            style={styles.input}
-            value={dob}
-            onChangeText={setDob}
-            placeholder="e.g. 15081995"
-            placeholderTextColor="rgba(255,255,255,0.2)"
-            keyboardType="number-pad"
-            maxLength={8}
-            secureTextEntry
-          />
-        </View>
+
 
         <View style={styles.inputGroup}>
           <Text style={styles.label}>FACE AUTHENTICATION</Text>
