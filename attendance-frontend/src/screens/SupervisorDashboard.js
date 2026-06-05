@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, SafeAreaView, FlatList, TouchableOpacity, Image, ActivityIndicator, SectionList, Alert } from 'react-native';
 import { apiService } from '../services/api';
 import { DatabaseService } from '../services/DatabaseService';
+import { Web3Service } from '../services/Web3Service';
+import { ethers } from 'ethers';
 
 export default function SupervisorDashboard({ navigation }) {
   const [data, setData] = useState({ attendance: [], failed_attempts: [] });
@@ -41,18 +43,34 @@ export default function SupervisorDashboard({ navigation }) {
         return;
       }
       
-      // Stub: in reality we'd POST these to the Python backend in a batch
-      // e.g. await apiService.batchSync(unsynced);
-      console.log('Syncing records to cloud...', unsynced.length);
+      console.log('Syncing records to Web3...', unsynced.length);
+
+      // 1. Generate Cryptographic Hash Block for the batch
+      // In a production Web3 app, we'd build a proper Merkle Tree. 
+      // For now, we hash the stringified batch to create a single root hash using ethers.
+      const batchString = JSON.stringify(unsynced);
+      const batchHash = ethers.id(batchString); // Pure JS Keccak256 hash
+
+      // 2. Mint the batch hash to the Polygon Blockchain via Web3Service
+      const supervisorId = 'SUP-001'; // hardcoded for demo
+      const web3Result = await Web3Service.mintBatchToBlockchain(batchHash, supervisorId, unsynced.length);
+
+      if (!web3Result.success) {
+        throw new Error(web3Result.message);
+      }
       
+      // 3. Mark locally as synced
       const ids = unsynced.map(r => r.id);
       await DatabaseService.markSynced(ids);
       
-      Alert.alert('Sync Complete', `Synced ${unsynced.length} records to the cloud.`);
+      Alert.alert(
+        'Web3 Sync Complete', 
+        `Minted ${unsynced.length} records to Polygon Blockchain!\n\nTxHash: ${web3Result.transactionHash}\n\nThis attendance block is now mathematically tamper-proof.`
+      );
       fetchData(); // Refresh UI
     } catch (e) {
-      console.error('Sync failed', e);
-      Alert.alert('Sync Failed', 'Could not sync records.');
+      console.error('Web3 Sync failed', e);
+      Alert.alert('Sync Failed', 'Could not sync records to Blockchain: ' + e.message);
     }
     setSyncing(false);
   };

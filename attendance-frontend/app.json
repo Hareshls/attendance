@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "FieldVerify",
+    "name": "Field Guard",
     "slug": "attendance-frontend",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -10,13 +10,13 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow FieldVerify to access your camera for face verification."
+          "cameraPermission": "Allow Field Guard to access your camera for face verification."
         }
       ],
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Allow FieldVerify to access your location for attendance."
+          "locationWhenInUsePermission": "Allow Field Guard to access your location for attendance."
         }
       ],
       "expo-sqlite",
@@ -24,10 +24,10 @@
     ],
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.fieldverify.attendance"
+      "bundleIdentifier": "com.fieldguard.attendance"
     },
     "android": {
-      "package": "com.fieldverify.attendance",
+      "package": "com.fieldguard.attendance",
       "permissions": [
         "CAMERA",
         "ACCESS_FINE_LOCATION",

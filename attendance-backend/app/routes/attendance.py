@@ -55,7 +55,13 @@ def init_db():
         role       TEXT,
         phone      TEXT,
         department TEXT,
-        embedding  TEXT
+        embedding  TEXT,
+        work_site_id TEXT,
+        work_site_name TEXT,
+        work_site_lat REAL,
+        work_site_lon REAL,
+        work_site_radius REAL,
+        dob TEXT
     )''')
     
     # Try adding photo_path column to existing tables just in case
@@ -65,6 +71,30 @@ def init_db():
         pass
     try:
         c.execute("ALTER TABLE failed_attempts ADD COLUMN photo_path TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE workers ADD COLUMN work_site_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE workers ADD COLUMN work_site_name TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE workers ADD COLUMN work_site_lat REAL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE workers ADD COLUMN work_site_lon REAL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE workers ADD COLUMN work_site_radius REAL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE workers ADD COLUMN dob TEXT")
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -82,10 +112,10 @@ def get_last_hash() -> str:
 
 @router.post("/attendance/checkin")
 def check_in(req: AttendanceRequest):
-    # Get worker saved embedding from sqlite
+    # Get worker saved embedding and work site details from sqlite
     conn = sqlite3.connect(DB_PATH)
     c    = conn.cursor()
-    c.execute("SELECT name, embedding FROM workers WHERE worker_id = ?", (req.worker_id,))
+    c.execute("SELECT name, embedding, work_site_lat, work_site_lon, work_site_radius FROM workers WHERE worker_id = ?", (req.worker_id,))
     row  = c.fetchone()
     conn.close()
 
@@ -94,6 +124,9 @@ def check_in(req: AttendanceRequest):
 
     worker_name     = row[0]
     saved_embedding = json.loads(row[1])
+    site_lat        = row[2] if row[2] is not None else req.site_lat
+    site_lon        = row[3] if row[3] is not None else req.site_lon
+    site_radius     = row[4] if row[4] is not None else 200.0
     previous_hash   = get_last_hash()
 
     import base64
@@ -115,8 +148,9 @@ def check_in(req: AttendanceRequest):
         saved_embedding = saved_embedding,
         lat             = req.latitude,
         lon             = req.longitude,
-        site_lat        = req.site_lat,
-        site_lon        = req.site_lon,
+        site_lat        = site_lat,
+        site_lon        = site_lon,
+        site_radius     = site_radius,
         ear_value       = req.ear_value,
         response_latency= req.response_latency,
         challenge       = req.challenge,

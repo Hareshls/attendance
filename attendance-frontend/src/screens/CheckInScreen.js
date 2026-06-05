@@ -10,22 +10,25 @@ import * as Location from 'expo-location';
 import { DatabaseService } from '../services/DatabaseService';
 import { initTFJS } from '../utils/tfjsSetup';
 import * as tf from '@tensorflow/tfjs';
-import * as faceapi from 'face-api.js';
-import { decodeJpeg } from '@tensorflow/tfjs-react-native';
+import * as FaceService from '../services/FaceService';
 import { Buffer } from 'buffer';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { getLocation } from '../utils/location';
+import { useIsFocused } from '@react-navigation/native';
+import { calculateDistance } from '../utils/sites';
 
 const { width } = Dimensions.get('window');
 const FRAME = width * 0.78;
 const CHALLENGES = ['BLINK', 'SMILE', 'TURN LEFT', 'TURN RIGHT', 'NOD'];
 
 export default function CheckInScreen({ navigation }) {
+  const isFocused = useIsFocused();
   const [permission, requestPermission] = useCameraPermissions();
   const hasPermission = permission?.granted;
   const cameraRef = useRef(null);
 
   const [step, setStep]         = useState('idle'); // idle -> location_preview -> challenge -> scanning -> verifying
+  const [cameraKey, setCameraKey] = useState(0);
   const [challenge, setChallenge] = useState('');
   const [workerId, setWorkerId] = useState('');
   const [result, setResult]     = useState(null);
@@ -68,6 +71,15 @@ export default function CheckInScreen({ navigation }) {
   };
 
   const startLocationPreview = async () => {
+    // 0. Fetch encrypted worker from local SQLite FIRST
+    const worker = await DatabaseService.getWorkerLocally(workerId);
+    
+    if (!worker) {
+      setResult({ success: false, message: 'Worker not found locally. Please enroll first.' });
+      setStep('failed');
+      return;
+    }
+
     if (!hasPermission) {
       await requestPermission();
       return;
@@ -116,6 +128,23 @@ export default function CheckInScreen({ navigation }) {
     }
   };
 
+  const processPhoto = async (photo) => {
+      const { width: imgW, height: imgH } = photo;
+      const size = Math.min(imgW, imgH);
+      const originX = (imgW - size) / 2;
+      const originY = (imgH - size) / 2;
+
+      const resizedPhoto = await ImageManipulator.manipulateAsync(
+        photo.uri,
+        [
+          { crop: { originX, originY, width: size, height: size } },
+          { resize: { width: 112, height: 112 } } // MobileFaceNet requires exactly 112x112
+        ],
+        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+      );
+      return resizedPhoto.base64;
+  };
+
   const handleCapture = async () => {
     if (!cameraRef.current) return;
     const latencyMs = Date.now() - challengeStart.current;
@@ -123,60 +152,65 @@ export default function CheckInScreen({ navigation }) {
     setStep('scanning');
 
     try {
-      const photo = await cameraRef.current.takePictureAsync({ base64: false, quality: 0.5 });
+      // 1. Capture and PROCESS first frame IMMEDIATELY
+      const photo1 = await cameraRef.current.takePictureAsync({ base64: false, quality: 0.3 });
+      const base64Data1 = await processPhoto(photo1);
+      
+      // Delay for Active Challenge (give user time to move/smile)
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      // 2. Capture and process second frame
+      const photo2 = await cameraRef.current.takePictureAsync({ base64: false, quality: 0.3 });
+      const base64Data2 = await processPhoto(photo2);
       
       setStep('verifying'); // UI feedback immediately
 
-      // -- RESIZE IMAGE FOR FASTER TFJS PROCESSING --
-      const resizedPhoto = await ImageManipulator.manipulateAsync(
-        photo.uri,
-        [{ resize: { width: 250 } }], // aggressively shrink image for CPU JS
-        { compress: 0.5, format: ImageManipulator.SaveFormat.JPEG, base64: true }
-      );
-      const base64Data = resizedPhoto.base64;
-
-      // 1. Fetch encrypted worker from local SQLite
+      // Fetch encrypted worker from local SQLite
       const worker = await DatabaseService.getWorkerLocally(workerId);
-      
-      if (!worker) {
-        setResult({ success: false, message: 'Worker not found locally. Please enroll first.' });
+
+      // Extract embeddings for both frames
+      const liveEmbedding1 = await FaceService.extractEmbedding(base64Data1);
+      const liveEmbedding2 = await FaceService.extractEmbedding(base64Data2);
+
+      // --- LIVENESS DETECTION ---
+      const livenessCheck = FaceService.checkLivenessByMovement(liveEmbedding1, liveEmbedding2);
+      if (!livenessCheck.isLive) {
+        setResult({ success: false, message: livenessCheck.reason, similarity: 0 });
         setStep('failed');
         return;
       }
 
-      // 2. Decode Jpeg to TF Tensor
-      const raw = Buffer.from(base64Data, 'base64');
-      const tensor = decodeJpeg(new Uint8Array(raw));
-
-      // 3. Extract embedding from live photo
-      const detection = await faceapi.detectSingleFace(tensor, new faceapi.TinyFaceDetectorOptions({ inputSize: 160 }))
-        .withFaceLandmarks()
-        .withFaceDescriptor();
-
-      tensor.dispose(); // CRITICAL
-
-      if (!detection) {
-        setResult({ success: false, message: 'No face detected in frame. Try again.' });
-        setStep('failed');
-        return;
+      // --- GEOFENCE VERIFICATION ---
+      if (worker.work_site_lat && worker.work_site_lon) {
+        const distance = calculateDistance(
+          locationObj ? locationObj.latitude : 0,
+          locationObj ? locationObj.longitude : 0,
+          worker.work_site_lat,
+          worker.work_site_lon
+        );
+        const radius = worker.work_site_radius || 200;
+        if (distance > radius) {
+          setResult({
+            success: false,
+            message: `Location mismatch. Access Denied.\n\nYou are at ${address || 'unknown address'}.\nAllotted site: ${worker.work_site_name} (${Math.round(distance)}m away, limit ${radius}m).`,
+            similarity: 0
+          });
+          setStep('failed');
+          return;
+        }
       }
 
-      const liveEmbedding = Array.from(detection.descriptor);
-
-      // 4. Compute Euclidean Distance (or Cosine Similarity)
-      const distance = faceapi.euclideanDistance(liveEmbedding, worker.embedding);
-      // face-api threshold is usually 0.6 for euclidian distance
-      // lower is better (closer match)
-      const isMatch = distance < 0.6;
-      const similarityScore = Math.max(0, 100 - (distance * 100)); // rough conversion to %
+      // --- IDENTITY VERIFICATION ---
+      // Compute Cosine Similarity Match using MobileFaceNet model math against the first frame
+      const { matched: isMatch, similarity: similarityScore } = FaceService.compareFaces(worker.embedding, liveEmbedding1);
 
       if (!isMatch) {
-        setResult({ success: false, message: 'Face mismatch. Access Denied.' });
+        setResult({ success: false, message: 'Face mismatch. Access Denied.', similarity: similarityScore });
         setStep('failed');
         return;
       }
 
-      // 5. Compute Risk Score (Simulated Liveness & Location)
+      // Compute Risk Score
       const risk_level = similarityScore > 85 ? 'LOW' : 'MEDIUM';
 
       // 6. Log Attendance Locally
@@ -246,10 +280,10 @@ export default function CheckInScreen({ navigation }) {
             {ok ? 'VERIFIED' : 'REJECTED'}
           </Text>
           {result?.message && <Text style={styles.resultMsg}>{result.message}</Text>}
-          {result?.similarity && (
+          {result?.similarity != null && (
             <View style={styles.statRow}>
               <Text style={styles.statLbl}>MATCH</Text>
-              <Text style={[styles.statVal, { color: result.similarity >= 60 ? '#00FF9C' : '#FF4D6D' }]}>{result.similarity}%</Text>
+              <Text style={[styles.statVal, { color: parseFloat(result.similarity) >= 60 ? '#00FF9C' : '#FF4D6D' }]}>{result.similarity}%</Text>
             </View>
           )}
           {result?.risk_level && (
@@ -269,7 +303,7 @@ export default function CheckInScreen({ navigation }) {
             <Text style={styles.doneBtnText}>DONE</Text>
           </TouchableOpacity>
           {!ok && (
-            <TouchableOpacity onPress={reset}>
+            <TouchableOpacity onPress={resetAll}>
               <Text style={styles.retryText}>TRY AGAIN</Text>
             </TouchableOpacity>
           )}
@@ -304,10 +338,11 @@ export default function CheckInScreen({ navigation }) {
         )}
 
         {/* Camera */}
-        {step !== 'idle' && step !== 'location_preview' && (
+        {step !== 'idle' && step !== 'location_preview' && isFocused && (
         <View style={styles.cameraSection}>
           <View style={styles.cameraFrame}>
             <CameraView
+              key={cameraKey}
               ref={cameraRef}
               style={StyleSheet.absoluteFill}
               facing="front"
@@ -390,8 +425,7 @@ const styles = StyleSheet.create({
   
   cameraSection: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   cameraFrame  : {
-    width: FRAME, height: FRAME, borderRadius: 24,
-    overflow: 'hidden', backgroundColor: '#111',
+    width: FRAME, height: FRAME, backgroundColor: '#111',
   },
   corner       : { position: 'absolute', width: 28, height: 28, borderColor: '#00FF9C', zIndex: 10 },
   cTL          : { top: 12, left: 12, borderTopWidth: 3, borderLeftWidth: 3 },

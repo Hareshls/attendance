@@ -7,13 +7,17 @@ const ENCRYPTION_KEY_ID = 'secure_aes_key';
 
 let db = null;
 let aesKey = null;
+let initPromise = null;
 
 export const DatabaseService = {
   /**
    * Initializes the DB, enables WAL, and sets up AES key.
    */
   init: async () => {
-    try {
+    if (initPromise) return initPromise;
+
+    initPromise = (async () => {
+      try {
       // 1. Setup Encryption Key
       aesKey = await SecureStore.getItemAsync(ENCRYPTION_KEY_ID);
       if (!aesKey) {
@@ -41,7 +45,12 @@ export const DatabaseService = {
           role TEXT,
           department TEXT,
           encrypted_embedding TEXT,
-          image_base64 TEXT
+          image_base64 TEXT,
+          work_site_id TEXT,
+          work_site_name TEXT,
+          work_site_lat REAL,
+          work_site_lon REAL,
+          work_site_radius REAL
         );
         CREATE TABLE IF NOT EXISTS attendance (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,14 +62,40 @@ export const DatabaseService = {
           latitude REAL,
           longitude REAL,
           timestamp TEXT,
+          record_hash TEXT,
           synced INTEGER DEFAULT 0
         );
       `);
+
+      // Attempt to upgrade existing schema if needed
+      try {
+        await db.execAsync('ALTER TABLE attendance ADD COLUMN record_hash TEXT;');
+      } catch (e) {
+        // Column probably exists, safe to ignore
+      }
+      try {
+        await db.execAsync('ALTER TABLE workers ADD COLUMN work_site_id TEXT;');
+      } catch (e) {}
+      try {
+        await db.execAsync('ALTER TABLE workers ADD COLUMN work_site_name TEXT;');
+      } catch (e) {}
+      try {
+        await db.execAsync('ALTER TABLE workers ADD COLUMN work_site_lat REAL;');
+      } catch (e) {}
+      try {
+        await db.execAsync('ALTER TABLE workers ADD COLUMN work_site_lon REAL;');
+      } catch (e) {}
+      try {
+        await db.execAsync('ALTER TABLE workers ADD COLUMN work_site_radius REAL;');
+      } catch (e) {}
       console.log('Offline Database Initialized ✅');
     } catch (e) {
       console.error('Database Init Error:', e);
+      initPromise = null; // allow retrying if it failed
     }
-  },
+  })();
+  return initPromise;
+},
 
   /**
    * Encrypt data with AES-256
@@ -95,9 +130,11 @@ export const DatabaseService = {
     const encryptedEmbedding = DatabaseService.encryptData(worker.embedding);
     
     try {
-      await db.runAsync(
-        `INSERT OR REPLACE INTO workers (worker_id, name, dob, role, department, encrypted_embedding, image_base64) 
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      db.runSync(
+        `INSERT OR REPLACE INTO workers (
+          worker_id, name, dob, role, department, encrypted_embedding, image_base64,
+          work_site_id, work_site_name, work_site_lat, work_site_lon, work_site_radius
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           worker.worker_id,
           worker.worker_name,
@@ -105,7 +142,12 @@ export const DatabaseService = {
           worker.role,
           worker.department,
           encryptedEmbedding,
-          worker.image_base64
+          worker.image_base64,
+          worker.work_site_id || null,
+          worker.work_site_name || null,
+          worker.work_site_lat || null,
+          worker.work_site_lon || null,
+          worker.work_site_radius || null
         ]
       );
       return { success: true };
@@ -121,7 +163,7 @@ export const DatabaseService = {
   getWorkerLocally: async (worker_id) => {
     if (!db) await DatabaseService.init();
     try {
-      const row = await db.getFirstAsync('SELECT * FROM workers WHERE worker_id = ?', [worker_id]);
+      const row = db.getFirstSync('SELECT * FROM workers WHERE worker_id = ?', [worker_id]);
       if (!row) return null;
 
       // Decrypt embedding
@@ -134,14 +176,27 @@ export const DatabaseService = {
   },
 
   /**
-   * Logs check-in to local SQLite DB.
+   * Logs check-in to local SQLite DB with SHA-256 Hash Chain
    */
   logAttendanceLocally: async (record) => {
     if (!db) await DatabaseService.init();
     try {
-      await db.runAsync(
-        `INSERT INTO attendance (worker_id, worker_name, similarity, risk_level, trust_score, latitude, longitude, timestamp, synced)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      const timestamp = new Date().toISOString();
+      
+      // 1. Get the last record's hash to maintain the Blockchain
+      let previousHash = "GENESIS";
+      const lastRecord = db.getFirstSync('SELECT record_hash FROM attendance ORDER BY id DESC LIMIT 1');
+      if (lastRecord && lastRecord.record_hash) {
+        previousHash = lastRecord.record_hash;
+      }
+
+      // 2. Generate new SHA-256 Tamper-Proof Seal
+      const hashInput = `${record.worker_id}|${timestamp}|${record.latitude}|${record.longitude}|${record.similarity}|${previousHash}`;
+      const newHash = CryptoJS.SHA256(hashInput).toString();
+
+      db.runSync(
+        `INSERT INTO attendance (worker_id, worker_name, similarity, risk_level, trust_score, latitude, longitude, timestamp, record_hash, synced)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
         [
           record.worker_id,
           record.worker_name,
@@ -150,10 +205,11 @@ export const DatabaseService = {
           record.trust_score,
           record.latitude,
           record.longitude,
-          new Date().toISOString()
+          timestamp,
+          newHash
         ]
       );
-      return { success: true };
+      return { success: true, hash: newHash };
     } catch (e) {
       console.error('Error logging attendance locally', e);
       return { success: false, error: e.message };
@@ -166,7 +222,7 @@ export const DatabaseService = {
   getUnsyncedAttendance: async () => {
     if (!db) await DatabaseService.init();
     try {
-      return await db.getAllAsync('SELECT * FROM attendance WHERE synced = 0');
+      return db.getAllSync('SELECT * FROM attendance WHERE synced = 0');
     } catch (e) {
       console.error('Error getting unsynced attendance', e);
       return [];
@@ -180,9 +236,30 @@ export const DatabaseService = {
     if (!db || !ids || ids.length === 0) return;
     try {
       const placeholders = ids.map(() => '?').join(',');
-      await db.runAsync(`UPDATE attendance SET synced = 1 WHERE id IN (${placeholders})`, ids);
+      db.runSync(`UPDATE attendance SET synced = 1 WHERE id IN (${placeholders})`, ids);
     } catch (e) {
       console.error('Error marking synced', e);
+    }
+  },
+
+  /**
+   * Purges synced records older than specified days to manage storage size
+   * Vital for Scalability & Sustainability (Edge AI Optimization)
+   */
+  purgeSyncedRecords: async (daysOld = 7) => {
+    if (!db) await DatabaseService.init();
+    try {
+      // Calculate the date threshold
+      const purgeDate = new Date();
+      purgeDate.setDate(purgeDate.getDate() - daysOld);
+      const purgeDateString = purgeDate.toISOString();
+
+      const result = db.runSync(`DELETE FROM attendance WHERE synced = 1 AND timestamp < ?`, [purgeDateString]);
+      console.log(`[Purge] Successfully removed ${result.changes} old synced records.`);
+      return { success: true, purgedCount: result.changes };
+    } catch (e) {
+      console.error('Error purging old records', e);
+      return { success: false, error: e.message };
     }
   }
 };

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  StyleSheet, Animated, Alert, ScrollView, Dimensions
+  StyleSheet, Animated, Alert, ScrollView, Dimensions, KeyboardAvoidingView, Platform, SafeAreaView
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -9,23 +9,24 @@ import { apiService } from '../services/api';
 import { DatabaseService } from '../services/DatabaseService';
 import { initTFJS } from '../utils/tfjsSetup';
 import * as tf from '@tensorflow/tfjs';
-import * as faceapi from 'face-api.js';
 import { decodeJpeg } from '@tensorflow/tfjs-react-native';
 import { Buffer } from 'buffer';
 import * as ImageManipulator from 'expo-image-manipulator';
+import * as FaceService from '../services/FaceService';
+import { useIsFocused } from '@react-navigation/native';
+import { WORK_SITES } from '../utils/sites';
 
 const { width } = Dimensions.get('window');
 
-const ROLE_MAPPINGS = {
-  'Site Engineer': 'Civil',
-  'Electrician': 'Electrical',
-  'Plumber': 'Plumbing',
-  'Security': 'Operations',
-  'Welder': 'Mechanical',
-  'Supervisor': 'Management'
+const WORKER_TYPE_MAPPINGS = {
+  'Regular Employees': 'Staff',
+  'Deputationists': 'Deputation',
+  'Consultants/External Professionals': 'Advisory',
+  'Outsourced/Toll Plaza Staff': 'Outsourced'
 };
 
 export default function SupervisorRegisterScreen({ navigation }) {
+  const isFocused = useIsFocused();
   const [permission, requestPermission] = useCameraPermissions();
   const hasPermission = permission?.granted;
   const camera = useRef(null);
@@ -33,12 +34,15 @@ export default function SupervisorRegisterScreen({ navigation }) {
   const [step, setStep]         = useState('form');   // form|capture|done
   const [workerId, setWorkerId] = useState('');
   const [workerName, setWorkerName] = useState('');
-  const [role, setRole]         = useState('');
+  const [role, setRole]         = useState('Regular Employees');
+  const [dob, setDob]           = useState('');
   const [phone, setPhone]       = useState('');
-  const [department, setDepartment] = useState('');
+  const [department, setDepartment] = useState('Staff');
   const [loading, setLoading]   = useState(false);
   const [captured, setCaptured] = useState(0);        // how many photos taken
-  const [photos, setPhotos]     = useState([]);
+  const [embeddings, setEmbeddings] = useState([]);   // store 3 float32 arrays
+  const [firstBase64, setFirstBase64] = useState(''); // keep the first photo for display
+  const [selectedSite, setSelectedSite] = useState(WORK_SITES[0]);
 
   const fadeAnim  = useRef(new Animated.Value(0)).current;
   const shakeAnim = useRef(new Animated.Value(0)).current;
@@ -46,10 +50,11 @@ export default function SupervisorRegisterScreen({ navigation }) {
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 700, useNativeDriver: true }).start();
     
-    // Initialize Offline DB and TFJS
+    // Initialize Offline DB, TFJS, and C++ TFLite Model
     const initOfflineDependencies = async () => {
       await DatabaseService.init();
       await initTFJS();
+      await FaceService.loadFaceNetModel();
     };
     initOfflineDependencies();
   }, []);
@@ -73,7 +78,7 @@ export default function SupervisorRegisterScreen({ navigation }) {
     
     if (!hasPermission) {
       const result = await requestPermission();
-      if (!result) {
+      if (!result || !result.granted) {
         Alert.alert('Permission required', 'Camera access is needed to capture your face.');
         return;
       }
@@ -85,45 +90,115 @@ export default function SupervisorRegisterScreen({ navigation }) {
     if (!camera.current) return;
     try {
       setLoading(true);
-      const photo = await camera.current.takePictureAsync({ base64: true, quality: 0.5 });
+      const photo = await camera.current.takePictureAsync({ base64: false, quality: 0.5 });
       
-      // Upload to server for instant extraction
-      const apiResult = await apiService.register({
-        worker_id: workerId.trim(),
-        worker_name: workerName.trim(),
-        role: role.trim(),
-        department: department.trim(),
-        photo_uri: resizedPhoto.uri // Use shrunk image so upload takes 10ms
-      });
+      // 1. Crop to 112x112 exactly like CheckInScreen
+      const { width: imgW, height: imgH } = photo;
+      const size = Math.min(imgW, imgH);
+      const originX = (imgW - size) / 2;
+      const originY = (imgH - size) / 2;
 
-      if (!apiResult.success) {
+      const resizedPhoto = await ImageManipulator.manipulateAsync(
+        photo.uri,
+        [
+          { crop: { originX, originY, width: size, height: size } },
+          { resize: { width: 112, height: 112 } }
+        ],
+        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+      );
+      
+      const base64Data = resizedPhoto.base64;
+      if (captured === 0) setFirstBase64(base64Data);
+
+      // 2. Extract Embedding locally via C++ Engine
+      const embedding = await FaceService.extractEmbedding(base64Data);
+      
+      const newEmbeddings = [...embeddings, embedding];
+      setEmbeddings(newEmbeddings);
+      setCaptured(captured + 1);
+
+      if (captured + 1 < 3) {
         setLoading(false);
-        Alert.alert('Server Error', apiResult.message || 'Failed to extract face');
-        return;
+        return; // wait for next tap
       }
 
-      // Save worker to local encrypted SQLite for OFFLINE Check-ins
+      // 3. We have 3 embeddings! Calculate Mean Embedding
+      const sumEmbedding = new Array(128).fill(0);
+      for (let i = 0; i < 3; i++) {
+        for (let j = 0; j < 128; j++) {
+          sumEmbedding[j] += newEmbeddings[i][j];
+        }
+      }
+      
+      const meanEmbedding = sumEmbedding.map(val => val / 3.0);
+      
+      // L2 Normalize the mean embedding
+      let norm = 0;
+      for (let j = 0; j < 128; j++) {
+        norm += meanEmbedding[j] * meanEmbedding[j];
+      }
+      norm = Math.sqrt(norm);
+      const finalEmbedding = meanEmbedding.map(val => val / norm);
+
+      // 4. Send the calculated embedding to the Python Cloud Database
+      const apiData = {
+        worker_id   : workerId.trim(),
+        worker_name : workerName.trim(),
+        role        : role.trim(),
+        department  : department.trim(),
+        phone       : phone.trim(),
+        dob         : dob.trim(),
+        embedding   : finalEmbedding,
+        photo_uri   : photo.uri, // send the original high-res photo for the dashboard
+        work_site_id: selectedSite.id,
+        work_site_name: selectedSite.name,
+        work_site_lat: selectedSite.latitude,
+        work_site_lon: selectedSite.longitude,
+        work_site_radius: selectedSite.radius,
+      };
+
+      let apiResult = null;
+      let syncFailed = false;
+      try {
+        apiResult = await apiService.register(apiData);
+        if (!apiResult || !apiResult.success) {
+          syncFailed = true;
+        }
+      } catch (apiError) {
+        console.warn('Could not register to cloud, falling back to local-only database:', apiError);
+        syncFailed = true;
+      }
+
+      // 5. Save to Offline SQLite Database!
       const worker = {
         worker_id   : workerId.trim(),
         worker_name : workerName.trim(),
-        dob         : '',
+        dob         : dob.trim(),
         role        : role.trim(),
         phone       : phone.trim(),
         department  : department.trim(),
-        image_base64: base64Data,
-        embedding   : apiResult.embedding,
+        image_base64: firstBase64 || base64Data, // save the first one for offline display
+        embedding   : finalEmbedding,
+        work_site_id: selectedSite.id,
+        work_site_name: selectedSite.name,
+        work_site_lat: selectedSite.latitude,
+        work_site_lon: selectedSite.longitude,
+        work_site_radius: selectedSite.radius,
       };
 
       const result = await DatabaseService.saveWorkerLocally(worker);
 
       if (result.success) {
+        if (syncFailed) {
+          Alert.alert('Offline Mode', 'Registration saved locally! It will sync to the cloud when online.');
+        }
         setStep('done');
       } else {
         Alert.alert('Local DB Error', result.error || 'Failed to save locally');
       }
     } catch (e) {
       console.error(e);
-      Alert.alert('Network Error', 'Could not connect to the server for registration.');
+      Alert.alert('Extraction Error', 'Error details: ' + (e.message || String(e)));
     } finally {
       setLoading(false);
     }
@@ -132,7 +207,7 @@ export default function SupervisorRegisterScreen({ navigation }) {
   // ── DONE SCREEN ──
   if (step === 'done') {
     return (
-      <View style={styles.container}>
+      <SafeAreaView style={styles.container}>
         <View style={styles.doneCard}>
           <View style={styles.doneIconWrap}>
             <Text style={styles.doneIcon}>◈</Text>
@@ -151,14 +226,14 @@ export default function SupervisorRegisterScreen({ navigation }) {
             <Text style={styles.doneBtnText}>BACK TO DASHBOARD  →</Text>
           </TouchableOpacity>
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
   // ── CAPTURE SCREEN ──
   if (step === 'capture') {
     return (
-      <View style={styles.container}>
+      <SafeAreaView style={styles.container}>
         <View style={styles.header}>
           <TouchableOpacity onPress={() => setStep('form')}>
             <Text style={styles.backBtn}>← BACK</Text>
@@ -170,7 +245,7 @@ export default function SupervisorRegisterScreen({ navigation }) {
         <View style={styles.captureSection}>
           {/* Photo counter */}
           <View style={styles.photoCounter}>
-            {[0].map(i => (
+            {[0, 1, 2].map(i => (
               <View key={i} style={[
                 styles.photoDot,
                 { backgroundColor: i < captured ? '#00FF9C' : 'rgba(255,255,255,0.15)' }
@@ -179,17 +254,19 @@ export default function SupervisorRegisterScreen({ navigation }) {
           </View>
 
           <Text style={styles.captureInstruction}>
-            {captured === 0 && 'LOOK STRAIGHT AT CAMERA'}
-            {captured === 1 && 'PROCESSING...'}
+            {captured < 3 && `TAKE PHOTO ${captured + 1} OF 3`}
+            {captured === 3 && 'PROCESSING...'}
           </Text>
 
           {/* Camera */}
           <View style={styles.cameraBox}>
-            <CameraView
-              ref={camera}
-              style={StyleSheet.absoluteFill}
-              facing="front"
-            />
+            {isFocused && (
+              <CameraView
+                ref={camera}
+                style={StyleSheet.absoluteFill}
+                facing="front"
+              />
+            )}
             <View style={[styles.corner, styles.cornerTL]} />
             <View style={[styles.corner, styles.cornerTR]} />
             <View style={[styles.corner, styles.cornerBL]} />
@@ -208,15 +285,19 @@ export default function SupervisorRegisterScreen({ navigation }) {
             </View>
           )}
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
   // ── FORM SCREEN ──
   return (
-    <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
-      <ScrollView showsVerticalScrollIndicator={false}>
-        <View style={styles.header}>
+    <KeyboardAvoidingView 
+      style={{ flex: 1 }} 
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+          <View style={styles.header}>
           <TouchableOpacity onPress={() => navigation.goBack()}>
             <Text style={styles.backBtn}>← BACK</Text>
           </TouchableOpacity>
@@ -234,14 +315,14 @@ export default function SupervisorRegisterScreen({ navigation }) {
             One time setup. Takes 30 seconds.
           </Text>
 
-          {/* Worker ID */}
+          {/* Employee ID */}
           <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>WORKER ID</Text>
+            <Text style={styles.inputLabel}>EMPLOYEE ID</Text>
             <TextInput
               style={styles.input}
               value={workerId}
               onChangeText={setWorkerId}
-              placeholder="e.g. W-1001"
+              placeholder="e.g. EMP-1001"
               placeholderTextColor="rgba(255,255,255,0.2)"
               autoCapitalize="characters"
             />
@@ -259,22 +340,32 @@ export default function SupervisorRegisterScreen({ navigation }) {
             />
           </View>
 
-
-
-          {/* Role Selection */}
+          {/* Date of Birth */}
           <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>SELECT ROLE</Text>
+            <Text style={styles.inputLabel}>DATE OF BIRTH (OPTIONAL)</Text>
+            <TextInput
+              style={styles.input}
+              value={dob}
+              onChangeText={setDob}
+              placeholder="e.g. 15-08-1995"
+              placeholderTextColor="rgba(255,255,255,0.2)"
+            />
+          </View>
+
+          {/* Worker Type Selection */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>WORKER TYPE</Text>
             <View style={styles.roleGrid}>
-              {Object.keys(ROLE_MAPPINGS).map(r => (
+              {Object.keys(WORKER_TYPE_MAPPINGS).map(w => (
                 <TouchableOpacity
-                  key={r}
-                  style={[styles.roleBtn, role === r && styles.roleBtnActive]}
+                  key={w}
+                  style={[styles.roleBtn, role === w && styles.roleBtnActive]}
                   onPress={() => {
-                    setRole(r);
-                    setDepartment(ROLE_MAPPINGS[r]);
+                    setRole(w);
+                    setDepartment(WORKER_TYPE_MAPPINGS[w]);
                   }}
                 >
-                  <Text style={[styles.roleBtnTxt, role === r && styles.roleBtnTxtActive]}>{r}</Text>
+                  <Text style={[styles.roleBtnTxt, role === w && styles.roleBtnTxtActive]}>{w}</Text>
                 </TouchableOpacity>
               ))}
             </View>
@@ -293,14 +384,27 @@ export default function SupervisorRegisterScreen({ navigation }) {
             />
           </View>
 
-          {/* Info box */}
-          <View style={styles.infoBox}>
-            <Text style={styles.infoTitle}>WHAT HAPPENS NEXT</Text>
-            <Text style={styles.infoItem}>◦  1 face photo captured</Text>
-            <Text style={styles.infoItem}>◦  Face converted to 128 numbers</Text>
-            <Text style={styles.infoItem}>◦  Encrypted and saved on device</Text>
-            <Text style={styles.infoItem}>◦  No photos stored — only numbers</Text>
+          {/* Work Site Selection */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>ALLOT WORK SITE</Text>
+            <View style={styles.siteList}>
+              {WORK_SITES.map(s => (
+                <TouchableOpacity
+                  key={s.id}
+                  style={[styles.siteBtn, selectedSite.id === s.id && styles.siteBtnActive]}
+                  onPress={() => setSelectedSite(s)}
+                >
+                  <Text style={[styles.siteBtnTxt, selectedSite.id === s.id && styles.siteBtnTxtActive]}>
+                    {s.name}
+                  </Text>
+                  <Text style={[styles.siteBtnSub, selectedSite.id === s.id && styles.siteBtnSubActive]}>
+                    Lat: {s.latitude.toFixed(4)}, Lon: {s.longitude.toFixed(4)} (Radius: {s.radius}m)
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
           </View>
+
 
           <TouchableOpacity style={styles.nextBtn} onPress={goToCapture}>
             <Text style={styles.nextBtnText}>NEXT: CAPTURE FACE  →</Text>
@@ -308,6 +412,7 @@ export default function SupervisorRegisterScreen({ navigation }) {
         </Animated.View>
       </ScrollView>
     </Animated.View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -446,4 +551,32 @@ const styles = StyleSheet.create({
     paddingVertical: 16, paddingHorizontal: 32, marginTop: 16,
   },
   doneBtnText: { color: '#0A0A0F', fontWeight: '800', fontSize: 13, letterSpacing: 1 },
+  siteList: { gap: 10, marginTop: 4 },
+  siteBtn: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 12,
+    padding: 14,
+  },
+  siteBtnActive: {
+    backgroundColor: 'rgba(0,255,156,0.1)',
+    borderColor: '#00FF9C',
+  },
+  siteBtnTxt: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  siteBtnTxtActive: {
+    color: '#00FF9C',
+  },
+  siteBtnSub: {
+    color: 'rgba(255,255,255,0.35)',
+    fontSize: 11,
+  },
+  siteBtnSubActive: {
+    color: 'rgba(0,255,156,0.6)',
+  },
 });

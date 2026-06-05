@@ -37,12 +37,15 @@ export const apiService = {
 
   // ── Worker Face Login ──
   workerFaceLogin: async (data) => {
-    const response = await fetchWithTimeout(`${BASE_URL}/worker/face-login`, {
-      method : 'POST',
+    return fetchWithTimeout(`${BASE_URL}/worker/face-login`, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify(data),
-    });
-    return response.json();
+      body: JSON.stringify({
+        worker_id: data.worker_id,
+        image_base64: data.image_base64,
+        embedding_json: data.embedding_json || ""
+      })
+    }).then(res => res.json());
   },
 
   // ── Register new worker ──
@@ -54,13 +57,24 @@ export const apiService = {
     if (data.role) formData.append('role', data.role);
     if (data.phone) formData.append('phone', data.phone);
     if (data.department) formData.append('department', data.department);
+    if (data.dob) formData.append('dob', data.dob);
+    
+    if (data.work_site_id) formData.append('work_site_id', data.work_site_id);
+    if (data.work_site_name) formData.append('work_site_name', data.work_site_name);
+    if (data.work_site_lat !== undefined) formData.append('work_site_lat', String(data.work_site_lat));
+    if (data.work_site_lon !== undefined) formData.append('work_site_lon', String(data.work_site_lon));
+    if (data.work_site_radius !== undefined) formData.append('work_site_radius', String(data.work_site_radius));
+
+    if (data.embedding) formData.append('embedding_json', JSON.stringify(data.embedding));
     
     // In React Native, FormData accepts an object with uri, type, name for files
-    formData.append('image', {
-      uri: data.photo_uri,
-      type: 'image/jpeg',
-      name: 'face.jpg',
-    });
+    if (data.photo_uri) {
+      formData.append('image', {
+        uri: data.photo_uri,
+        type: 'image/jpeg',
+        name: 'face.jpg',
+      });
+    }
 
     const response = await fetchWithTimeout(`${BASE_URL}/register`, {
       method : 'POST',

@@ -1,4 +1,7 @@
 import 'react-native-get-random-values';
+import { useEffect } from 'react';
+import * as SplashScreen from 'expo-splash-screen';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
@@ -13,9 +16,18 @@ import SupervisorRegisterScreen from './src/screens/SupervisorRegisterScreen';
 
 const Stack = createNativeStackNavigator();
 
+// Keep the splash screen visible while we fetch resources
+SplashScreen.preventAutoHideAsync().catch(() => {});
+
 export default function App() {
+  useEffect(() => {
+    // Hide the splash screen instantly after the app boots
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
+
   return (
-    <NavigationContainer>
+    <SafeAreaProvider style={{ flex: 1 }}>
+      <NavigationContainer>
       <StatusBar style="light" backgroundColor="#0A0A0F" />
       <Stack.Navigator
         initialRouteName="Login"
@@ -34,6 +46,7 @@ export default function App() {
         <Stack.Screen name="SupervisorDashboard" component={SupervisorDashboard} />
         <Stack.Screen name="SupervisorRegister" component={SupervisorRegisterScreen} />
       </Stack.Navigator>
-    </NavigationContainer>
+      </NavigationContainer>
+    </SafeAreaProvider>
   );
 }

@@ -322,6 +322,7 @@ def full_verify_pipeline(
     lon              : float,
     site_lat         : float,
     site_lon         : float,
+    site_radius      : float = 200.0,
     ear_value        : float = 0.20,
     response_latency : float = 280,
     challenge        : str   = "blink",
@@ -362,8 +363,11 @@ def full_verify_pipeline(
         return {"success": False, "reason": "Wrong person ❌", "details": result}
 
     # ── Step 5: Geofencing ──
-    geo = check_geofence(lat, lon, site_lat, site_lon, is_mock_location=is_mock_location)
+    geo = check_geofence(lat, lon, site_lat, site_lon, radius_m=site_radius, is_mock_location=is_mock_location)
     result["geofence"] = geo
+
+    if not geo["in_zone"]:
+        return {"success": False, "reason": f"Outside assigned work site ({geo['distance_m']}m away) ❌", "details": result}
 
     # ── Step 6: Risk score ──
     risk = calculate_risk_score(

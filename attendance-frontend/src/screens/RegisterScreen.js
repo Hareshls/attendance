@@ -298,14 +298,6 @@ export default function RegisterScreen({ navigation }) {
             />
           </View>
 
-          {/* Info box */}
-          <View style={styles.infoBox}>
-            <Text style={styles.infoTitle}>WHAT HAPPENS NEXT</Text>
-            <Text style={styles.infoItem}>◦  3 face photos captured</Text>
-            <Text style={styles.infoItem}>◦  Face converted to 128 numbers</Text>
-            <Text style={styles.infoItem}>◦  Encrypted and saved on device</Text>
-            <Text style={styles.infoItem}>◦  No photos stored — only numbers</Text>
-          </View>
 
           <TouchableOpacity style={styles.nextBtn} onPress={goToCapture}>
             <Text style={styles.nextBtnText}>NEXT: CAPTURE FACE  →</Text>
